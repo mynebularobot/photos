@@ -228,6 +228,7 @@ class Front(unittest.TestCase):
             allowed_out = m.page_route("GET", "/photos/api/print-review/thumbnail/" + allowed,
                                        "month=2026-10", h, b"")
             self.assertEqual((allowed_out[0], allowed_out[1], allowed_out[2]), (200, "image/jpeg", b"jpeg"))
+            self.assertEqual(allowed_out[3]["Cache-Control"], "private, no-store")
             self.assertEqual(len(calls), 1)
         finally:
             m._immich = old_immich
@@ -282,7 +283,8 @@ class Front(unittest.TestCase):
             approved = m.approve_print_review("2026-10", expected_count=1,
                                               expected_revision=preview["revision"], confirmed=True)
             self.assertEqual((approved["state"], approved["purchase"]), ("approved", "No print order has been placed."))
-            self.assertNotIn(("POST", "/orders", None), calls)
+            forbidden = ("order", "payment", "checkout", "charge", "mail", "shipping")
+            self.assertFalse([call for call in calls if any(word in call[1].lower() for word in forbidden)])
         finally:
             m._api = old_api
 

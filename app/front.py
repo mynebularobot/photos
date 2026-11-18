@@ -1659,7 +1659,8 @@ def page_route(method, path, query, headers, body):
                     return _json(404, {"error": "not found"})
                 code, data = _immich("GET", "/assets/%s/thumbnail?size=preview" % asset_id,
                                      key=_key(), timeout=30, raw=True)
-                return (code, "image/jpeg", data) if code == 200 else _json(404, {"error": "not found"})
+                return ((code, "image/jpeg", data, {"Cache-Control": "private, no-store"})
+                        if code == 200 else _json(404, {"error": "not found"}))
             if method == "POST" and sub == "api/print-review/generate":
                 d = _review_body(headers, body, {"month", "limit"})
                 return _json(200, generate_print_review(d.get("month", ""), d.get("limit", 8)))
