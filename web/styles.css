@@ -14,6 +14,22 @@
 .ph-import-state { margin: 0 0 10px; font-weight: 600; }
 .ph-log { max-height: 30vh; overflow: auto; font-family: var(--wz-font-mono); font-size: var(--wz-text-sm); white-space: pre-wrap; margin: 10px 0 0; }
 
+/* Monthly print review. Thumbnails are the content; controls stay quiet and use the shared kit. */
+.ph-prints-sheet { width: min(760px, calc(100% - 24px)); }
+.ph-print-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 10px 0 16px; }
+.ph-print { position: relative; min-height: 112px; overflow: hidden; border-radius: var(--wz-radius-tile); background: var(--wz-surface); }
+.ph-print img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; }
+.ph-print::after { content: ""; position: absolute; inset: 0; border: 3px solid transparent; border-radius: inherit; pointer-events: none; }
+.ph-print[aria-pressed="true"]::after { border-color: var(--wz-accent); }
+.ph-print-mark { position: absolute; top: 7px; right: 7px; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; color: var(--wz-on-accent); background: var(--wz-accent); box-shadow: 0 1px 5px color-mix(in srgb, var(--wz-base) 45%, transparent); opacity: 0; }
+.ph-print[aria-pressed="true"] .ph-print-mark { opacity: 1; }
+.ph-print-meta { display: block; padding: 7px 8px 9px; color: var(--wz-text-secondary); font-size: var(--wz-text-sm); text-align: left; }
+.ph-print-note { display: grid; gap: 6px; margin: 0 0 12px; color: var(--wz-text-secondary); font-size: var(--wz-text-sm); }
+.ph-print-note textarea { width: 100%; resize: vertical; min-height: 80px; padding: 10px 12px; border: 1px solid var(--wz-border); border-radius: var(--wz-radius-tile); color: var(--wz-text); background: var(--wz-surface); font: inherit; }
+.ph-print-confirm { margin: 8px 0 0; padding-top: 12px; border-top: 1px solid var(--wz-border); }
+.ph-print-confirm p { margin: 0; font-weight: 650; }
+@media (min-width: 600px) { .ph-print-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+
 /* Phone backup sheet (rows and switches from the former view-only Photos app; kit variables only). */
 #backup-root .ph { display: flex; flex-direction: column; }
 .ph-intro, .ph-note, .ph-server { margin: 0 4px 10px; font-size: var(--wz-text-sm); line-height: 1.4; color: var(--wz-text-secondary); }

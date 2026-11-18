@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Photos (Wizard page API)",
-    "version": "0.2.0",
+    "version": "0.4.0",
     "description": "The Wizard page's own API at /photos/api. Same-origin, owner's shell origins only. Immich's API (https://api.immich.app) is served unchanged at /api on the same port."
   },
   "paths": {
@@ -74,6 +74,170 @@
         "responses": {
           "200": {
             "description": "started or why not"
+          }
+        }
+      }
+    },
+    "/photos/api/print-review": {
+      "get": {
+        "summary": "Read the previous month's grandparent print review",
+        "parameters": [
+          {
+            "name": "month",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "review"
+          }
+        }
+      }
+    },
+    "/photos/api/print-review/generate": {
+      "post": {
+        "summary": "Generate a suggested monthly shortlist",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "month": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}$"},
+                  "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "draft review"
+          },
+          "400": {
+            "description": "invalid input"
+          },
+          "403": {
+            "description": "owner only"
+          },
+          "404": {
+            "description": "feature is off"
+          }
+        }
+      }
+    },
+    "/photos/api/print-review/save": {
+      "post": {
+        "summary": "Save selected candidate ids and the month note",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["asset_ids"],
+                "properties": {
+                  "month": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}$"},
+                  "asset_ids": {"type": "array", "minItems": 1, "maxItems": 20,
+                    "items": {"type": "string", "format": "uuid"}},
+                  "note": {"type": "string", "maxLength": 500}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "draft review"
+          },
+          "400": {
+            "description": "invalid input"
+          },
+          "403": {
+            "description": "owner only"
+          },
+          "404": {
+            "description": "feature is off"
+          }
+        }
+      }
+    },
+    "/photos/api/print-review/approve": {
+      "post": {
+        "summary": "Preview or explicitly approve the exact print set; never places an order",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["confirmed"],
+                "properties": {
+                  "month": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}$"},
+                  "confirmed": {"type": "boolean"},
+                  "expected_count": {"type": "integer", "minimum": 1, "maximum": 20},
+                  "expected_revision": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "approval preview or approved review"
+          },
+          "400": {
+            "description": "invalid input, changed review or stale approval preview"
+          },
+          "403": {
+            "description": "owner only"
+          },
+          "404": {
+            "description": "feature is off"
+          }
+        }
+      }
+    },
+    "/photos/api/print-review/thumbnail/{assetId}": {
+      "get": {
+        "summary": "Owner-only thumbnail for a review candidate",
+        "parameters": [
+          {
+            "name": "assetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "month",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JPEG thumbnail"
+          },
+          "403": {
+            "description": "owner only"
+          },
+          "404": {
+            "description": "not a candidate in this review or feature is off"
           }
         }
       }

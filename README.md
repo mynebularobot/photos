@@ -17,6 +17,7 @@ Images and environment follow Immich's own [v3.4.1 docker-compose.yml](https://g
 2. The agent is connected by itself (a narrow Immich API key that stays on the box).
 3. Import from Google: Takeout (Google Photos only, .zip, 50 GB) → put every part in `Files/Photos/Import` → **Import now**. Uses [immich-go](https://github.com/simulot/immich-go) v0.32.0, fetched on first use and checked against its release SHA-256.
 4. Phone: the official Immich app, server = the app's own Tailscale address (`https://<box>.ts.net:8871`), **Next**, then **Continue**. Nothing to type but the address.
+5. Optional: in **Try new features**, turn on **Monthly grandparent print review**. Photos suggests a varied shortlist from the previous month using favorites, faces, semantic matches and print resolution. The owner can adjust it, add a note and explicitly approve the set. Approval never orders, mails or pays for prints.
 
 ## No sign-in: Tailscale is the lock
 The app's port is served only on the owner's tailnet, so reaching it is the access control. The front makes that true for Immich too, without changing Immich:
@@ -27,7 +28,7 @@ The app's port is served only on the owner's tailnet, so reaching it is the acce
 - An Immich that already has an account the front did not create is left alone (status explains); reinstall with data removed to start fresh.
 
 ## Agent tools (MCP, box-only)
-`photos_status`, `photos_people`, `photos_search`, `photos_move_to_trash` (preview, then confirmed with the exact count; Immich trash only, never `force`), `photos_restore_from_trash`, `photos_import_status`, `photos_import_start`. See [SKILL.md](SKILL.md).
+`photos_status`, `photos_people`, `photos_search`, `photos_print_review` (off-by-default; generate, edit and explicitly approve only, never purchase), `photos_move_to_trash` (preview, then confirmed with the exact count; Immich trash only, never `force`), `photos_restore_from_trash`, `photos_import_status`, `photos_import_start`. See [SKILL.md](SKILL.md).
 
 ## Develop
 Edit `mcp/front.py`, `mcp/tools.py` or `web/`, then `python3 mcp/inline.py` (regenerates the compose `command` and `app/front.py`), `python3 -m unittest discover -s tests`, `wam verify .`.

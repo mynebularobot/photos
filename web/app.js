@@ -63,6 +63,7 @@ function render(s) {
   el('phone-line').textContent = phone ? 'Phone backup: install the Immich app, type ' + phone + ' as the server, tap Next, then Continue. Keep Tailscale on.' : '';
   if (phone) backup.server = phone;
   el('agent-line').textContent = s.agent_connected ? 'Your agent is connected to Photos.' : 'Your agent connects by itself once Photos has finished setting up.';
+  el('open-prints').hidden = !(s.features && s.features.grandparent_print_review);
 }
 
 function renderImport(d) {
@@ -112,10 +113,120 @@ el('import-go').onclick = async () => {
   catch (e) { say(e.message, 'error'); }
   try { renderImport(await request('api/import')); } catch (e) {}
 };
+
+// ---- Monthly grandparent print review (off-by-default feature switch) ----
+let printReview = null;
+let printApprovalRevision = '';
+
+function selectedPrintIds() {
+  return (printReview && printReview.candidates || []).filter(x => x.selected).map(x => x.id);
+}
+
+function printDate(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? String(value).slice(0, 10) : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function renderPrints(d) {
+  printReview = d;
+  printApprovalRevision = '';
+  const ids = selectedPrintIds();
+  const started = d.state !== 'not_started';
+  const has = !!(d.candidates && d.candidates.length);
+  el('prints-summary').textContent = d.label + (started ? ' · ' + ids.length + ' selected · ' + (d.state === 'approved' ? 'Approved' : d.state === 'empty' ? 'No photos found' : 'Draft') : ' · Not started');
+  el('prints-empty').hidden = d.state !== 'empty';
+  el('prints-review').hidden = !has;
+  el('prints-start').hidden = has;
+  el('prints-generate').textContent = started ? 'Check for photos again' : 'Suggest last month’s photos';
+  el('prints-confirm').hidden = true;
+  if (!has) return;
+
+  const grid = el('prints-grid');
+  grid.replaceChildren();
+  for (const asset of d.candidates) {
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'ph-print';
+    button.setAttribute('aria-pressed', String(!!asset.selected));
+    const detail = [printDate(asset.taken), (asset.people || []).slice(0, 3).join(', '), asset.file || 'photo'].filter(Boolean).join(', ');
+    button.setAttribute('aria-label', (asset.selected ? 'Selected. Remove ' : 'Not selected. Add ') + detail + ' from the print set');
+    const img = document.createElement('img'); img.src = asset.thumbnail; img.alt = '';
+    const check = document.createElement('span'); check.className = 'ph-print-mark'; check.setAttribute('aria-hidden', 'true'); check.textContent = '✓';
+    const meta = document.createElement('span'); meta.className = 'ph-print-meta';
+    const names = (asset.people || []).slice(0, 3).join(', ');
+    meta.textContent = [printDate(asset.taken), names].filter(Boolean).join(' · ') || asset.file || 'Photo';
+    button.append(img, check, meta);
+    button.onclick = () => {
+      asset.selected = !asset.selected;
+      printReview.state = 'draft';
+      button.setAttribute('aria-pressed', String(asset.selected));
+      button.setAttribute('aria-label', (asset.selected ? 'Selected. Remove ' : 'Not selected. Add ') + detail + ' from the print set');
+      renderPrintSummary();
+    };
+    grid.append(button);
+  }
+  el('prints-note').value = d.note || '';
+  renderPrintSummary();
+}
+
+function renderPrintSummary() {
+  if (!printReview) return;
+  printApprovalRevision = '';
+  const count = selectedPrintIds().length;
+  el('prints-summary').textContent = printReview.label + ' · ' + count + ' selected · ' + (printReview.state === 'approved' ? 'Approved' : 'Draft');
+  el('prints-save').disabled = count < 1;
+  el('prints-approve').disabled = count < 1;
+  el('prints-confirm').hidden = true;
+}
+
+async function savePrints() {
+  if (!printReview) return null;
+  return request('api/print-review/save', { month: printReview.month, asset_ids: selectedPrintIds(), note: el('prints-note').value });
+}
+
+el('open-prints').onclick = async () => {
+  WzSheet.open(el('prints-sheet'));
+  try { renderPrints(await request('api/print-review')); } catch (e) { say(e.message, 'error'); }
+};
+el('prints-generate').onclick = async () => {
+  el('prints-generate').disabled = true;
+  try { renderPrints(await request('api/print-review/generate', { limit: 8 })); }
+  catch (e) { say(e.message, 'error'); }
+  finally { el('prints-generate').disabled = false; }
+};
+el('prints-save').onclick = async () => {
+  el('prints-save').disabled = true;
+  try { renderPrints(await savePrints()); say('Print set saved. Nothing has been ordered.', 'note'); }
+  catch (e) { say(e.message, 'error'); }
+  finally { if (printReview) el('prints-save').disabled = false; }
+};
+el('prints-approve').onclick = async () => {
+  el('prints-approve').disabled = true;
+  try {
+    renderPrints(await savePrints());
+    const preview = await request('api/print-review/approve', { month: printReview.month, confirmed: false });
+    printApprovalRevision = preview.revision;
+    el('prints-confirm-line').textContent = 'Approve these ' + preview.would_approve + ' photos as the print set? No order will be placed.';
+    el('prints-confirm').hidden = false;
+  } catch (e) { say(e.message, 'error'); }
+  finally { el('prints-approve').disabled = false; }
+};
+el('prints-confirm-no').onclick = () => { printApprovalRevision = ''; el('prints-confirm').hidden = true; };
+el('prints-confirm-yes').onclick = async () => {
+  el('prints-confirm-yes').disabled = true;
+  try {
+    const d = await request('api/print-review/approve', { month: printReview.month, expected_count: selectedPrintIds().length,
+      expected_revision: printApprovalRevision, confirmed: true });
+    renderPrints(d); say('Print set approved. Nothing has been ordered.', 'note');
+  } catch (e) { say(e.message, 'error'); }
+  finally { el('prints-confirm-yes').disabled = false; }
+};
+el('prints-note').addEventListener('input', () => { if (printReview) printReview.state = 'draft'; renderPrintSummary(); });
+
 if (!window.WizardApp || WizardApp.version !== 1) {
   say('Wizard system functions are unavailable. Open Photos through Wizard.', 'error');
 } else {
-  WizardApp.ready({ name: 'Photos', version: '0.3.0' });
+  WizardApp.ready({ name: 'Photos', version: '0.4.0' });
   WizardApp.back.register({ canGoBack: () => false, back: () => false });
 }
 

@@ -15,12 +15,17 @@ import hashlib
 import hmac
 import http.client as httpclient  # bound as httpclient only: the front's own http() helper keeps its name
 import io
+import calendar
+import datetime
+import json
 import re
 import secrets
 import subprocess
 import tarfile
 import threading
+import time
 import urllib.error
+import urllib.parse
 
 STATE = os.environ.get("STATE_DIR") or os.environ.get("DATA_DIR") or "/state"
 IMPORT_DIR = os.environ.get("IMPORT_DIR", "/import")
@@ -45,6 +50,8 @@ IMMICH_GO = {
               "2c35d9284baae407ef9540bdac5f488971b0bdc7be758a4d7c05ab270af09fdb"),
 }
 IMPORT_DEFAULTS = {"include_archived": True, "include_partner": True, "sync_albums": True, "include_trashed": False}
+PRINT_REVIEW_FILE = "grandparent-print-reviews.json"
+PRINT_REVIEW_SWITCH = "grandparent-print-review"
 LOCK = threading.Lock()
 RUN = {"proc": None}
 
@@ -187,6 +194,7 @@ def status(headers=None):
                               "smartSearch", "duplicateDetection", "videoConversion")}
     out["disk"] = _du(LIBRARY_DIR) or _du(STATE)
     out["import"] = import_summary()
+    out["features"] = {"grandparent_print_review": switch_on(PRINT_REVIEW_SWITCH)}
     own = _own_url(headers)
     out["links"] = {"wizard": "?open=photos", **({"immich": own + "/", "mobile_server_url": own} if own else {})}
     if not out["immich"]["reachable"]:
@@ -304,6 +312,251 @@ def search(query="", person="", taken_after="", taken_before="", media_type="", 
     body = _api("POST", "/search/metadata", dict(f, size=limit, withExif=True, withPeople=True, order="desc"))
     items = (body.get("assets") or {}).get("items") or []
     return {"mode": "filters", "total_matching": total, "shown": len(items), "assets": [_asset_row(a, own) for a in items]}
+
+
+# ---------------- monthly grandparent print review ----------------
+
+def _review_month(month=""):
+    if month is not None and not isinstance(month, str):
+        raise ValueError("month must look like 2026-10")
+    if not month:
+        today = datetime.datetime.now(datetime.timezone.utc).date()
+        month = (today.replace(day=1) - datetime.timedelta(days=1)).strftime("%Y-%m")
+    if not re.match(r"^\d{4}-\d{2}\Z", str(month)):
+        raise ValueError("month must look like 2026-10")
+    year, number = (int(x) for x in str(month).split("-"))
+    if year < 1970 or number < 1 or number > 12:
+        raise ValueError("month must look like 2026-10")
+    return "%04d-%02d" % (year, number)
+
+
+def _review_dates(month):
+    year, number = (int(x) for x in month.split("-"))
+    last = calendar.monthrange(year, number)[1]
+    return "%s-01" % month, "%s-%02d" % (month, last)
+
+
+def _review_label(month):
+    return datetime.date(int(month[:4]), int(month[5:]), 1).strftime("%B %Y")
+
+
+def _review_store():
+    data = _read_json(PRINT_REVIEW_FILE, {}) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def _review_write(data):
+    _write_json(PRINT_REVIEW_FILE, data)
+
+
+def _asset_dimensions(asset):
+    exif = asset.get("exifInfo") or {}
+    width = asset.get("width") or exif.get("exifImageWidth") or exif.get("imageWidth") or 0
+    height = asset.get("height") or exif.get("exifImageHeight") or exif.get("imageHeight") or 0
+    try:
+        return int(width or 0), int(height or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+
+
+def _review_asset_row(asset, month, selected=False):
+    row = _asset_row(asset, _own_url())
+    width, height = _asset_dimensions(asset)
+    row.update(selected=bool(selected), favorite=bool(asset.get("isFavorite")), width=width or None,
+               height=height or None, thumbnail="api/print-review/thumbnail/%s?month=%s" %
+               (asset["id"], urllib.parse.quote(month)))
+    return row
+
+
+def _review_assets(ids):
+    out = []
+    for asset_id in ids:
+        if not UUID_RE.match(str(asset_id)):
+            raise ValueError("not an Immich asset id: %s" % asset_id)
+        asset = _api("GET", "/assets/%s" % asset_id)
+        if asset.get("type") != "IMAGE":
+            raise ValueError("Grandparent print sets can contain photos, not videos.")
+        out.append(asset)
+    return out
+
+
+def _review_candidates(month, cap=5000):
+    start, end = _review_dates(month)
+    filters = _filters(taken_after=start, taken_before=end, media_type="IMAGE")
+    try:
+        total = int(_api("POST", "/search/statistics", filters).get("total") or 0)
+    except RuntimeError:
+        total = 0
+    items, page = [], 1
+    while len(items) < cap:
+        body = _api("POST", "/search/metadata", dict(filters, size=min(1000, cap - len(items)), page=page,
+                                                       withExif=True, withPeople=True, order="desc"), timeout=120)
+        assets = body.get("assets") or {}
+        items += assets.get("items") or []
+        if not assets.get("nextPage"):
+            break
+        page = int(assets["nextPage"])
+
+    # Immich's semantic rank is useful for finding people and occasions. It is only a boost: favorites,
+    # faces, resolution and date variety still work before smart search has finished indexing.
+    smart_rank = {}
+    if items:
+        try:
+            body = _api("POST", "/search/smart", dict(filters, query="family people portrait celebration pets",
+                                                       size=min(300, len(items)), withExif=True), timeout=120)
+            for i, asset in enumerate((body.get("assets") or {}).get("items") or []):
+                smart_rank[asset["id"]] = max(1, 40 - i / 10)
+        except RuntimeError:
+            pass
+
+    scored = []
+    for asset in items:
+        width, height = _asset_dimensions(asset)
+        megapixels = width * height / 1000000 if width and height else 0
+        people = asset.get("people") or []
+        named = [p for p in people if (p.get("name") or "").strip()]
+        score = smart_rank.get(asset["id"], 0)
+        score += 100 if asset.get("isFavorite") else 0
+        score += 22 if people else 0
+        score += min(len(people), 4) * 3 + min(len(named), 4) * 2
+        score += min(megapixels, 12)
+        score += 2 if (asset.get("exifInfo") or {}).get("city") else 0
+        scored.append((score, asset))
+    scored.sort(key=lambda pair: (-pair[0], str(pair[1].get("localDateTime") or pair[1].get("fileCreatedAt") or "")))
+    ranked = [asset for _, asset in scored]
+    return ranked, max(total, len(ranked))
+
+
+def _varied_ids(assets, count):
+    chosen, seen, per_day = [], set(), {}
+    # First pass gives different days a chance. The second fills from the strongest remaining moments.
+    for limit_per_day in (1, 2, 1000):
+        for asset in assets:
+            asset_id = asset["id"]
+            if asset_id in seen:
+                continue
+            day = str(asset.get("localDateTime") or asset.get("fileCreatedAt") or "unknown")[:10]
+            if per_day.get(day, 0) >= limit_per_day:
+                continue
+            chosen.append(asset_id)
+            seen.add(asset_id)
+            per_day[day] = per_day.get(day, 0) + 1
+            if len(chosen) >= count:
+                return chosen
+    return chosen
+
+
+def _review_revision(record):
+    reviewed = {"asset_ids": record.get("asset_ids") or [], "note": record.get("note") or "",
+                "updated_at": record.get("updated_at")}
+    return hashlib.sha256(json.dumps(reviewed, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def print_review_status(month=""):
+    month = _review_month(month)
+    record = (_review_store().get("reviews") or {}).get(month)
+    base = {"month": month, "label": _review_label(month), "purchase": "No print order has been placed."}
+    if not record:
+        return dict(base, state="not_started", selected_count=0, candidates=[], asset_ids=[], note="",
+                    next="Generate a suggested shortlist, then review it before approving a print set.")
+    selected = set(record.get("asset_ids") or [])
+    candidates, missing = [], []
+    for asset_id in record.get("candidate_ids") or []:
+        try:
+            asset = _review_assets([asset_id])[0]
+            candidates.append(_review_asset_row(asset, month, asset_id in selected))
+        except RuntimeError:
+            missing.append(asset_id)
+    available_selected = selected & {x["id"] for x in candidates}
+    state = "needs_refresh" if missing else record.get("state")
+    if missing:
+        next_step = "%d review photo(s) are no longer available. Save the remaining selection or generate a fresh review." % len(missing)
+    else:
+        next_step = ("This print set is approved, but nothing has been ordered." if state == "approved"
+                     else "Adjust the photos and note, then explicitly approve the print set.")
+    return {**base, **record, "state": state, "selected_count": len(available_selected), "candidates": candidates,
+            "missing_asset_ids": missing, "revision": _review_revision(record), "next": next_step}
+
+
+def generate_print_review(month="", limit=8):
+    if not switch_on(PRINT_REVIEW_SWITCH):
+        raise RuntimeError("Monthly print review is not turned on in Try new features.")
+    month = _review_month(month)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+        raise ValueError("limit must be an integer from 1 to 20")
+    data = _review_store()
+    existing = (data.get("reviews") or {}).get(month)
+    if existing and existing.get("state") not in ("empty",):
+        out = print_review_status(month)
+        out["next"] = "A review already exists for this month. It was left unchanged."
+        return out
+    assets, total = _review_candidates(month)
+    candidate_count = min(len(assets), max(12, min(limit * 2, 30)))
+    candidate_ids = [a["id"] for a in assets[:candidate_count]]
+    selected_ids = _varied_ids(assets[:candidate_count], min(limit, candidate_count))
+    now = int(time.time())
+    record = {"state": "draft" if selected_ids else "empty", "source_count": total,
+              "considered_count": len(assets), "candidate_ids": candidate_ids, "asset_ids": selected_ids, "note": "",
+              "generated_at": now, "updated_at": now}
+    data.setdefault("reviews", {})[month] = record
+    _review_write(data)
+    out = print_review_status(month)
+    if not selected_ids:
+        out["next"] = "No photos were found for this month. Turn on phone backup or import a Google Photos archive first."
+    return out
+
+
+def save_print_review(month, asset_ids, note=""):
+    if not switch_on(PRINT_REVIEW_SWITCH):
+        raise RuntimeError("Monthly print review is not turned on in Try new features.")
+    month = _review_month(month)
+    data = _review_store()
+    record = (data.get("reviews") or {}).get(month)
+    if not record:
+        raise ValueError("Generate this month's shortlist first.")
+    if not isinstance(asset_ids, list) or any(not isinstance(x, str) for x in asset_ids):
+        raise ValueError("asset_ids must be a list of photo ids")
+    ids = list(dict.fromkeys(asset_ids))
+    if not ids or len(ids) > 20:
+        raise ValueError("Choose between 1 and 20 photos.")
+    candidates = set(record.get("candidate_ids") or [])
+    if any(not UUID_RE.match(x) or x not in candidates for x in ids):
+        raise ValueError("Choose photos from this month's review candidates.")
+    _review_assets(ids)
+    if not isinstance(note, str) or len(note) > 500:
+        raise ValueError("The month note must be 500 characters or fewer.")
+    record.update(state="draft", asset_ids=ids, note=note.strip(), updated_at=int(time.time()))
+    for key in ("approved_at",):
+        record.pop(key, None)
+    _review_write(data)
+    return print_review_status(month)
+
+
+def approve_print_review(month, expected_count=None, expected_revision="", confirmed=False):
+    if not switch_on(PRINT_REVIEW_SWITCH):
+        raise RuntimeError("Monthly print review is not turned on in Try new features.")
+    month = _review_month(month)
+    data = _review_store()
+    record = (data.get("reviews") or {}).get(month)
+    if not record or not record.get("asset_ids"):
+        raise ValueError("Choose and save at least one photo first.")
+    if not isinstance(confirmed, bool):
+        raise ValueError("confirmed must be true or false")
+    count = len(record["asset_ids"])
+    revision = _review_revision(record)
+    _review_assets(record["asset_ids"])
+    if not confirmed:
+        return {"preview": True, "month": month, "would_approve": count,
+                "note": record.get("note") or "", "revision": revision, "purchase": "No order will be placed.",
+                "next": "Get the owner's explicit yes, then call again with confirmed=true, expected_count=%d and this revision." % count}
+    if isinstance(expected_count, bool) or not isinstance(expected_count, int) or expected_count != count:
+        raise ValueError("The print set now has %d photos, not %s. Review it again before approving." %
+                         (count, expected_count))
+    if not isinstance(expected_revision, str) or not hmac.compare_digest(expected_revision, revision):
+        raise ValueError("The print set changed after the approval preview. Review it again before approving.")
+    record.update(state="approved", approved_at=int(time.time()), updated_at=int(time.time()))
+    _review_write(data)
+    return print_review_status(month)
 
 
 # ---------------- trash (never a permanent delete) ----------------
@@ -901,6 +1154,32 @@ def photos_search(query="", person="", taken_after="", taken_before="", media_ty
     return search(query, person, taken_after, taken_before, media_type, city, favorite, limit)
 
 
+@tool("photos_print_review", "Prepare and review a suggested monthly set of family photos for grandparent prints. "
+      "Actions: status reads a month (previous month by default); generate ranks that month's photos and saves a draft; "
+      "save changes the selected candidate ids and note; approve first previews the exact count and revision, then requires "
+      "confirmed=true with the same expected_count and expected_revision. Approval prepares the set only: this tool never orders, mails or pays for prints.",
+      {"action": {"type": "string", "enum": ["status", "generate", "save", "approve"]},
+       "month": {"type": "string", "description": "YYYY-MM; previous calendar month when omitted"},
+       "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+       "asset_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
+       "note": {"type": "string", "maxLength": 500}, "expected_count": {"type": "integer"},
+       "expected_revision": {"type": "string"}, "confirmed": {"type": "boolean"}}, required=("action",))
+def photos_print_review(action, month="", limit=8, asset_ids=None, note="", expected_count=None,
+                        expected_revision="", confirmed=False):
+    _box_only()
+    if not switch_on(PRINT_REVIEW_SWITCH):
+        raise RuntimeError("Monthly print review is not turned on in Try new features.")
+    if action == "status":
+        return print_review_status(month)
+    if action == "generate":
+        return generate_print_review(month, limit)
+    if action == "save":
+        return save_print_review(month, asset_ids, note)
+    if action == "approve":
+        return approve_print_review(month, expected_count, expected_revision, confirmed)
+    raise ValueError("action is status, generate, save or approve")
+
+
 @tool("photos_move_to_trash", "Move photos/videos to Immich's TRASH (restorable for the trash period, 30 days by "
       "default; never a permanent delete). Pick them by asset_ids, or by person and/or date range. First call without "
       "confirmed: it returns the exact count and a sample. Tell the owner the count, get his explicit yes, then call "
@@ -973,12 +1252,40 @@ def _body(headers, body):
     return d
 
 
+def _review_body(headers, body, allowed, required=()):
+    d = _body(headers, body)
+    unknown = set(d) - set(allowed)
+    missing = set(required) - set(d)
+    if unknown or missing:
+        raise ValueError("invalid print-review fields")
+    if "month" in d and not isinstance(d["month"], str):
+        raise ValueError("month must be a string like 2026-10")
+    if "limit" in d and (isinstance(d["limit"], bool) or not isinstance(d["limit"], int) or not 1 <= d["limit"] <= 20):
+        raise ValueError("limit must be an integer from 1 to 20")
+    if "asset_ids" in d and (not isinstance(d["asset_ids"], list) or len(d["asset_ids"]) > 20 or
+                              any(not isinstance(x, str) for x in d["asset_ids"])):
+        raise ValueError("asset_ids must be a list of up to 20 ids")
+    if "note" in d and (not isinstance(d["note"], str) or len(d["note"]) > 500):
+        raise ValueError("note must be a string of 500 characters or fewer")
+    if "confirmed" in d and not isinstance(d["confirmed"], bool):
+        raise ValueError("confirmed must be true or false")
+    if "expected_count" in d and (isinstance(d["expected_count"], bool) or not isinstance(d["expected_count"], int)):
+        raise ValueError("expected_count must be an integer")
+    if "expected_revision" in d and not isinstance(d["expected_revision"], str):
+        raise ValueError("expected_revision must be a string")
+    return d
+
+
 # ---- wizard.app-switches/1 (wizard-os docs/APP_SWITCHES.md) ----
 # Owner feature switches. New features ship behind one, off by default: append it to SWITCHES
 # ({"id", "name", "description", "default": False, "issues": ["oscarhenrycollins/photos#N"]}) and gate it on
 # switch_on(id). Kept on the box (STATE_DIR/switches.json). Owner only: the box's Tailscale Serve login with
 # X-Wizard-Switch: 1; never a bearer or a box-local host.
-SWITCHES = []
+SWITCHES = [
+    {"id": PRINT_REVIEW_SWITCH, "name": "Monthly grandparent print review",
+     "description": "Suggest last month's best family photos, then let you adjust and approve a print set. Nothing is ordered.",
+     "default": False, "issues": ["humanitylabs-org/photos#2"]},
+]
 _SW_LOCAL = {"localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0"}
 
 
@@ -1086,6 +1393,35 @@ def page_route(method, path, query, headers, body):
             if method == "POST" and sub == "api/import/start":
                 _body(headers, body)
                 return _json(200, import_start(True))
+            if sub.startswith("api/print-review") and not switch_on(PRINT_REVIEW_SWITCH):
+                return _json(404, {"error": "Monthly print review is not turned on.", "code": "feature_off"})
+            if method == "GET" and sub == "api/print-review":
+                month = dict(urllib.parse.parse_qsl(query)).get("month", "")
+                return _json(200, print_review_status(month))
+            if method == "GET" and sub.startswith("api/print-review/thumbnail/"):
+                asset_id = sub.rsplit("/", 1)[-1]
+                params = dict(urllib.parse.parse_qsl(query))
+                if not params.get("month"):
+                    raise ValueError("month is required for review thumbnails")
+                month = _review_month(params["month"])
+                record = (_review_store().get("reviews") or {}).get(month) or {}
+                if (not UUID_RE.match(asset_id) or not _key() or
+                        asset_id not in set(record.get("candidate_ids") or [])):
+                    return _json(404, {"error": "not found"})
+                code, data = _immich("GET", "/assets/%s/thumbnail?size=preview" % asset_id,
+                                     key=_key(), timeout=30, raw=True)
+                return (code, "image/jpeg", data) if code == 200 else _json(404, {"error": "not found"})
+            if method == "POST" and sub == "api/print-review/generate":
+                d = _review_body(headers, body, {"month", "limit"})
+                return _json(200, generate_print_review(d.get("month", ""), d.get("limit", 8)))
+            if method == "POST" and sub == "api/print-review/save":
+                d = _review_body(headers, body, {"month", "asset_ids", "note"}, required=("asset_ids",))
+                return _json(200, save_print_review(d.get("month", ""), d["asset_ids"], d.get("note", "")))
+            if method == "POST" and sub == "api/print-review/approve":
+                d = _review_body(headers, body, {"month", "expected_count", "expected_revision", "confirmed"},
+                                 required=("confirmed",))
+                return _json(200, approve_print_review(d.get("month", ""), d.get("expected_count"),
+                                                        d.get("expected_revision", ""), d["confirmed"]))
         except (ValueError, RuntimeError) as e:
             return _json(400, {"error": str(e)})
         return _json(404, {"error": "not found"})

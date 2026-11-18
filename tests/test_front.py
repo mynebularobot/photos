@@ -27,6 +27,10 @@ class Front(unittest.TestCase):
     def setUpClass(cls):
         cls.m = load()
 
+    def setUp(self):
+        self.m._write_json("switches.json", {})
+        self.m._write_json(self.m.PRINT_REVIEW_FILE, {})
+
     def test_generated_files_current(self):
         import subprocess
         r = subprocess.run([sys.executable, str(ROOT / "mcp" / "inline.py"), "--check"], capture_output=True, text=True)
@@ -181,6 +185,144 @@ class Front(unittest.TestCase):
         out = self.m.page_route("GET", "/photos/", "", {"host": "box.ts.net:8444"}, b"")
         self.assertEqual(out[0], 200)
         self.assertIn("frame-ancestors 'self'", out[3]["Content-Security-Policy"])
+
+    def test_monthly_print_review_is_off_by_default_and_has_issue(self):
+        self.assertFalse(self.m.switch_on(self.m.PRINT_REVIEW_SWITCH))
+        switch = next(x for x in self.m.switches_doc()["switches"] if x["id"] == self.m.PRINT_REVIEW_SWITCH)
+        self.assertEqual(switch["issues"], ["humanitylabs-org/photos#2"])
+        self.assertFalse(switch["on"])
+        out = self.m.page_route("GET", "/photos/api/print-review", "", {"host": "127.0.0.1:8871"}, b"")
+        self.assertEqual((out[0], json.loads(out[2])["code"]), (404, "feature_off"))
+        with self.assertRaisesRegex(RuntimeError, "not turned on"):
+            self.m.photos_print_review("status", "2026-10")
+
+    def test_monthly_print_review_http_approval_requires_real_boolean_and_revision(self):
+        m = self.m
+        m._write_json("switches.json", {m.PRINT_REVIEW_SWITCH: True})
+        asset_id = "00000000-0000-0000-0000-000000000001"
+        record = {"state": "draft", "candidate_ids": [asset_id], "asset_ids": [asset_id], "note": "",
+                  "generated_at": 1, "updated_at": 1}
+        m._write_json(m.PRINT_REVIEW_FILE, {"reviews": {"2026-10": record}})
+        headers = {"host": "127.0.0.1:8871", "content-type": "application/json"}
+        body = json.dumps({"month": "2026-10", "confirmed": "false", "expected_count": 1,
+                           "expected_revision": m._review_revision(record)}).encode()
+        out = m.page_route("POST", "/photos/api/print-review/approve", "", headers, body)
+        self.assertEqual(out[0], 400)
+        self.assertIn("confirmed must be true or false", json.loads(out[2])["error"])
+        self.assertEqual(m._review_store()["reviews"]["2026-10"]["state"], "draft")
+
+    def test_monthly_print_thumbnail_is_limited_to_review_candidates(self):
+        m = self.m
+        m._write_json("switches.json", {m.PRINT_REVIEW_SWITCH: True})
+        m._write_json("agent-key.json", {"secret": "k"})
+        allowed = "00000000-0000-0000-0000-000000000001"
+        other = "00000000-0000-0000-0000-000000000002"
+        m._write_json(m.PRINT_REVIEW_FILE, {"reviews": {"2026-10": {
+            "state": "draft", "candidate_ids": [allowed], "asset_ids": [allowed], "updated_at": 1}}})
+        calls, old_immich = [], m._immich
+        m._immich = lambda *a, **k: calls.append((a, k)) or (200, b"jpeg")
+        try:
+            h = {"host": "127.0.0.1:8871"}
+            denied = m.page_route("GET", "/photos/api/print-review/thumbnail/" + other, "month=2026-10", h, b"")
+            self.assertEqual((denied[0], calls), (404, []))
+            allowed_out = m.page_route("GET", "/photos/api/print-review/thumbnail/" + allowed,
+                                       "month=2026-10", h, b"")
+            self.assertEqual((allowed_out[0], allowed_out[1], allowed_out[2]), (200, "image/jpeg", b"jpeg"))
+            self.assertEqual(len(calls), 1)
+        finally:
+            m._immich = old_immich
+
+    def test_monthly_print_review_generate_save_and_explicit_approval(self):
+        m = self.m
+        m._write_json("switches.json", {m.PRINT_REVIEW_SWITCH: True})
+        ids = ["00000000-0000-0000-0000-00000000000%d" % i for i in range(1, 4)]
+        assets = [
+            {"id": ids[0], "type": "IMAGE", "originalFileName": "favourite.jpg", "localDateTime": "2026-10-20T10:00:00Z",
+             "isFavorite": True, "people": [{"name": "Nana"}], "exifInfo": {"exifImageWidth": 4000, "exifImageHeight": 3000}},
+            {"id": ids[1], "type": "IMAGE", "originalFileName": "family.jpg", "localDateTime": "2026-10-03T12:00:00Z",
+             "people": [{"name": "E"}], "exifInfo": {"exifImageWidth": 3000, "exifImageHeight": 2000}},
+            {"id": ids[2], "type": "IMAGE", "originalFileName": "other.jpg", "localDateTime": "2026-10-03T12:01:00Z",
+             "people": [], "exifInfo": {"exifImageWidth": 1200, "exifImageHeight": 800}},
+        ]
+        by_id = {x["id"]: x for x in assets}
+        calls = []
+        old_api = m._api
+
+        def fake_api(method, path, payload=None, timeout=60):
+            calls.append((method, path, payload))
+            if path == "/search/statistics":
+                return {"total": 3}
+            if path == "/search/metadata":
+                return {"assets": {"items": assets, "nextPage": None}}
+            if path == "/search/smart":
+                return {"assets": {"items": [assets[1]]}}
+            if path.startswith("/assets/"):
+                return by_id[path.rsplit("/", 1)[-1]]
+            raise AssertionError(path)
+
+        m._api = fake_api
+        try:
+            made = m.generate_print_review("2026-10", 2)
+            self.assertEqual((made["state"], made["source_count"], made["selected_count"]), ("draft", 3, 2))
+            self.assertEqual(made["asset_ids"][0], ids[0])  # favorites win even when smart search prefers another
+            saved = m.save_print_review("2026-10", [ids[1]], "October moments")
+            self.assertEqual((saved["asset_ids"], saved["note"]), ([ids[1]], "October moments"))
+            unchanged = m.generate_print_review("2026-10", 2)
+            self.assertEqual((unchanged["asset_ids"], unchanged["note"]), ([ids[1]], "October moments"))
+            self.assertIn("left unchanged", unchanged["next"])
+            preview = m.approve_print_review("2026-10")
+            self.assertEqual((preview["preview"], preview["would_approve"]), (True, 1))
+            with self.assertRaises(ValueError):
+                m.approve_print_review("2026-10", expected_count=2, expected_revision=preview["revision"], confirmed=True)
+            # A same-count selection swap invalidates the owner's preview.
+            m.save_print_review("2026-10", [ids[0]], "October moments")
+            with self.assertRaisesRegex(ValueError, "changed after the approval preview"):
+                m.approve_print_review("2026-10", expected_count=1, expected_revision=preview["revision"], confirmed=True)
+            preview = m.approve_print_review("2026-10")
+            approved = m.approve_print_review("2026-10", expected_count=1,
+                                              expected_revision=preview["revision"], confirmed=True)
+            self.assertEqual((approved["state"], approved["purchase"]), ("approved", "No print order has been placed."))
+            self.assertNotIn(("POST", "/orders", None), calls)
+        finally:
+            m._api = old_api
+
+    def test_monthly_print_review_empty_library_explains_import_or_backup(self):
+        m = self.m
+        m._write_json("switches.json", {m.PRINT_REVIEW_SWITCH: True})
+        old_api = m._api
+        m._api = lambda *a, **k: {"assets": {"items": [], "nextPage": None}}
+        try:
+            out = m.generate_print_review("2026-10")
+            self.assertEqual((out["state"], out["selected_count"]), ("empty", 0))
+            self.assertIn("phone backup", out["next"])
+            self.assertIn("import", out["next"])
+        finally:
+            m._api = old_api
+
+    def test_monthly_print_review_survives_one_missing_candidate(self):
+        m = self.m
+        m._write_json("switches.json", {m.PRINT_REVIEW_SWITCH: True})
+        present = "00000000-0000-0000-0000-000000000001"
+        missing = "00000000-0000-0000-0000-000000000002"
+        m._write_json(m.PRINT_REVIEW_FILE, {"reviews": {"2026-10": {
+            "state": "approved", "candidate_ids": [present, missing], "asset_ids": [present, missing],
+            "note": "October", "updated_at": 1}}})
+        old_api = m._api
+
+        def fake_api(method, path, payload=None, timeout=60):
+            if path.endswith(missing):
+                raise RuntimeError("Immich answered 404")
+            return {"id": present, "type": "IMAGE", "originalFileName": "present.jpg",
+                    "localDateTime": "2026-10-01T12:00:00Z", "people": [], "exifInfo": {}}
+
+        m._api = fake_api
+        try:
+            out = m.print_review_status("2026-10")
+            self.assertEqual((out["state"], out["selected_count"], len(out["candidates"])),
+                             ("needs_refresh", 1, 1))
+            self.assertEqual(out["missing_asset_ids"], [missing])
+        finally:
+            m._api = old_api
 
     def test_compose_pins_every_image(self):
         import re

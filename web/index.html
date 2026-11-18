@@ -22,6 +22,7 @@
       <p id="line">Loading…</p>
       <nav class="ph-actions" aria-label="Photos actions">
         <button id="open-backup" class="wz-chip" type="button" hidden>Phone backup</button>
+        <button id="open-prints" class="wz-chip" type="button" hidden>Monthly prints</button>
         <button id="open-import" class="wz-chip" type="button">Import from Google</button>
         <button id="open-agent" class="wz-chip" type="button">Agent</button>
         <a id="open-full" class="wz-chip" target="_blank" rel="noopener" hidden>Open full screen ↗</a>
@@ -51,6 +52,37 @@
     <ul class="wz-list" id="import-options" aria-label="Import options"></ul>
     <div class="wz-actions"><button id="import-go" class="wz-button" type="button" disabled>Import now</button></div>
     <pre id="import-log" class="ph-log" hidden></pre>
+  </dialog>
+
+  <dialog id="prints-sheet" class="wz-sheet ph-prints-sheet" aria-labelledby="prints-h">
+    <h2 id="prints-h">Monthly grandparent prints</h2>
+    <p id="prints-summary" class="ph-help"></p>
+    <div id="prints-empty" class="wz-empty" hidden>
+      <span class="wz-tile" aria-hidden="true">▧</span>
+      <strong>No photos to review yet</strong>
+      <p>Turn on phone backup or import your Google Photos archive first.</p>
+    </div>
+    <div id="prints-review" hidden>
+      <div id="prints-grid" class="ph-print-grid" aria-label="Print candidates"></div>
+      <label class="ph-print-note">Month note
+        <textarea id="prints-note" maxlength="500" rows="3" placeholder="A short note for the grandparents"></textarea>
+      </label>
+      <p id="prints-safe" class="ph-help">Approving prepares this set only. Photos never orders, mails or charges for prints.</p>
+      <div class="wz-actions">
+        <button id="prints-save" class="wz-button secondary" type="button">Save changes</button>
+        <button id="prints-approve" class="wz-button" type="button">Approve print set</button>
+      </div>
+      <div id="prints-confirm" class="ph-print-confirm" hidden>
+        <p id="prints-confirm-line"></p>
+        <div class="wz-actions">
+          <button id="prints-confirm-yes" class="wz-button" type="button">Yes, approve this set</button>
+          <button id="prints-confirm-no" class="wz-button quiet" type="button">Cancel</button>
+        </div>
+      </div>
+    </div>
+    <div id="prints-start" class="wz-actions">
+      <button id="prints-generate" class="wz-button" type="button">Suggest last month’s photos</button>
+    </div>
   </dialog>
 
   <dialog id="agent-sheet" class="wz-sheet" aria-labelledby="agent-h">
